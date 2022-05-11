@@ -33,7 +33,7 @@ from evograd.distributions import Normal
 import wandb
 from PIL import Image
 import matplotlib.pyplot as plt
-
+import pandas as pd
 data_X = [[0.55, 0.789, 0.697, 0.69873], [0.133654, 0.36524, 0.48563, 0.36589]]
 data_Y = [1, 0]
 
@@ -297,13 +297,16 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
             sum_of_absolute_values = torch.sum(torch.abs(parameters_to_vector(model.parameters())))
             sum_of_absolute_values.mul_(L1_lambda)
             value.add_(sum_of_absolute_values)
+            wandb.log({"train objective loss":value})
             if matrix_regularizer:
                 int_m, _, _, _ = ism(model, dim=dim, lb=LB, ub=UB, is_NN=True, use_grad=False)
                 int_m = replace_nan(int_m)
                 reg = 10000 * torch.linalg.matrix_norm(int_m)
+                value.add_(reg)
                 if use_wandb:
                     wandb.log({"scaled_frobenius_norm": reg})
-                value.add_(reg)
+                    wandb.log({"train combined loss": value})
+
             optimizer.zero_grad()
 
             value.backward()
@@ -615,8 +618,8 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     EPOCHS = 100
     BATCH_SIZE = 128
     LEARNING_RATE = 0.002
-    L1_reg = 1.5
-    L2_reg: float = 0
+    L1_reg = 0
+    L2_reg = 0.005
     N_samples = 10000
     dim = 4
     LB = 1
@@ -635,9 +638,12 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
 
     # W & B initialization
     if use_wandb:
+        is_regularized = "regularized" if use_frobenious else "non regularized"
+        name = f"{is_regularized}_differentiable_{float(np.random.rand(1))*1000:3.0f}"
         wandb.init(
             project="nn_interaction",
             entity="luis_alfredo",
+            name=name,
             tags=["interaction analysis"],
             reinit=True
         )
@@ -689,7 +695,10 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     torch.set_printoptions(linewidth=200)
     model.to(train_features.device)
     if use_wandb:
-        table = wandb.Table(data=replace_nan(lambda_matrix))
+        thing = replace_nan(lambda_matrix).detach().cpu().numpy()
+        dataFrame = pd.DataFrame(thing)
+
+        table = wandb.Table(dataframe=dataFrame)
         wandb.log({"final_lambda_matrix": table})
 
     print(f"The estimated lamda matrix of neural network after {EPOCHS} of training:\n{lambda_matrix}")
