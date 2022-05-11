@@ -33,6 +33,7 @@ from evograd.distributions import Normal
 import wandb
 from PIL import Image
 import matplotlib.pyplot as plt
+
 data_X = [[0.55, 0.789, 0.697, 0.69873], [0.133654, 0.36524, 0.48563, 0.36589]]
 data_Y = [1, 0]
 
@@ -648,7 +649,7 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     for e in pbar:
         l = loss_one_epoch(model, data_loader=train_loader, matrix_regularizer=use_frobenious, optimizer=optimizer,
                            loss=loss_object, train=True,
-                           L1_lambda=L1_reg,use_wandb=use_wandb)
+                           L1_lambda=L1_reg, use_wandb=use_wandb)
         pbar.set_description(f"loss:{l:0.3f}, , epoch: {e}")
 
     # inspect_layer_SVD(model, "0")
@@ -688,7 +689,8 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     torch.set_printoptions(linewidth=200)
     model.to(train_features.device)
     if use_wandb:
-        wandb.log({"final_lambda_matrix": lambda_matrix})
+        table = wandb.Table(data=replace_nan(lambda_matrix))
+        wandb.log({"final_lambda_matrix": table})
 
     print(f"The estimated lamda matrix of neural network after {EPOCHS} of training:\n{lambda_matrix}")
     print(f"The estimated interaction matrix of neural network after {EPOCHS} of training:\n {theta.astype(int)}")
