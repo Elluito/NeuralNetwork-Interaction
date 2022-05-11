@@ -32,7 +32,7 @@ from evograd import expectation
 from evograd.distributions import Normal
 import wandb
 from PIL import Image
-
+import matplotlib.pyplot as plt
 data_X = [[0.55, 0.789, 0.697, 0.69873], [0.133654, 0.36524, 0.48563, 0.36589]]
 data_Y = [1, 0]
 
@@ -705,6 +705,7 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     if use_frobenious:
         msg += "_frobenious_reg"
 
+    plt.figure()
     visualizer = ResidualsPlot(net, hist=False, qqplot=True)
 
     visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
@@ -712,17 +713,20 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     visualizer.score(test_features.detach().numpy(),
                      test_targets.detach().numpy())  # Evaluate the model on the test data
     visualizer.show(f"images/residual_plot_{msg}.png")
+    plt.close()
     if use_wandb:
         image = Image.open(f"images/residual_plot_{msg}.png")
         wandb.log({"residual plot": wandb.Image(image)})
 
     ### Now prediction error
+    plt.figure()
     visualizer = PredictionError(net)
     visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
     # visualizer
     visualizer.score(test_features.detach().numpy(),
                      test_targets.detach().numpy())  # Evaluate the model on the test data
     visualizer.show(f"images/prediction_error_{msg}.png")
+    plt.close()
     if use_wandb:
         image = Image.open(f"images/prediction_error_{msg}.png")
         wandb.log({"prediction error": wandb.Image(image)})
