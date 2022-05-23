@@ -124,7 +124,6 @@ def ism(f: typing.Callable, dim: int, ub: int, lb: int, is_NN: bool = False, use
                 # pdb.set_trace()
             return lambda_matrix, fhat_archive, f_archive, fp1
         else:
-
             with torch.no_grad():
                 temp = (ub + lb) / 2
                 f_archive = torch.zeros((dim, dim)) * torch.nan

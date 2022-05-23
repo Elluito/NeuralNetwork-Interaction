@@ -34,6 +34,8 @@ import wandb
 from PIL import Image
 import matplotlib.pyplot as plt
 import pandas as pd
+from scipy import spatial
+
 data_X = [[0.55, 0.789, 0.697, 0.69873], [0.133654, 0.36524, 0.48563, 0.36589]]
 data_Y = [1, 0]
 
@@ -236,7 +238,7 @@ class ResBlock(nn.Module):
     def forward(self, x): return x + self.linear_block(x)  # skip connection
 
 
-################################ FUNCTIONS################################
+################################ FUNCTIONS ################################
 
 def define_model(layer_neurons: type.List[int], input_size: int, CLASSES: int = 1):
     in_features = input_size
@@ -279,7 +281,8 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
                    loss: type.Callable,
                    matrix_regularizer: bool = False,
                    train: bool = True, L1_lambda: float = 0,
-                   use_wandb: bool = False
+                   use_wandb: bool = False,
+                   use_absolute: bool = False
                    ):
     # loss = nn.CrossEntropyLoss(reduction="sum")
     model.cuda()
@@ -291,21 +294,26 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
         data = data.cuda()
         label = label.cuda()
         value = compute_loss_batch(batch=(data, label), model=model, loss_object=loss, train=train)
-
+        # value = torch.zeros(1,device=torch.device("cuda"))
         if train:
             # Todo: Do I want the Biases also be included?
             sum_of_absolute_values = torch.sum(torch.abs(parameters_to_vector(model.parameters())))
             sum_of_absolute_values.mul_(L1_lambda)
             value.add_(sum_of_absolute_values)
-            wandb.log({"train objective loss":value})
+            wandb.log({"train objective loss": value})
             if matrix_regularizer:
-                int_m, _, _, _ = ism(model, dim=dim, lb=LB, ub=UB, is_NN=True, use_grad=False)
+                int_m, _, _, _ = ism(model, dim=dim, lb=LB, ub=UB, is_NN=True, use_grad=True)
                 int_m = replace_nan(int_m)
-                reg = 10000 * torch.linalg.matrix_norm(int_m)
+                reg = 0
+                if use_absolute:
+                    reg = 100 * torch.abs(int_m).sum()
+                else:
+                    reg = 100 * torch.linalg.matrix_norm(int_m)
+
                 value.add_(reg)
                 if use_wandb:
                     wandb.log({"scaled_frobenius_norm": reg})
-                    wandb.log({"train combined loss": value})
+                    # wandb.log({"train combined loss": value})
 
             optimizer.zero_grad()
 
@@ -315,15 +323,20 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
         else:
             if matrix_regularizer is not None:
                 with torch.no_grad():
-                    reg = 10000 * torch.linalg.matrix_norm(matrix_regularizer)
+                    wandb.log({"train objective loss": value})
+                    if matrix_regularizer:
+                        int_m, _, _, _ = ism(model, dim=dim, lb=LB, ub=UB, is_NN=True, use_grad=True)
+                        int_m = replace_nan(int_m)
+                        reg = 100 * torch.abs(int_m).sum()
+                    value.add_(reg)
                     if use_wandb:
                         wandb.log({"scaled_frobenius_norm": reg})
-                    value.add_(reg)
-
+                        wandb.log({"train combined loss": value})
         cumulative_sum += value.item()
         total_items += len(data)
         if batch_size == 1:
             batch_size = len(data)
+
     return cumulative_sum * batch_size / total_items
 
 
@@ -596,7 +609,11 @@ def test_model(model: nn.Module, loss_object, test_features: torch.Tensor, test_
           f"statistic: {t},p-value: {p_value}")
 
 
-def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool = False, use_wandb: bool = False):
+def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool = False,
+                               use_wandb: bool = False,
+                               use_absolute_value: bool = False,
+                               res_model: bool = False
+                               ):
     layers = []
     lr = 0.02
 
@@ -625,8 +642,11 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     LB = 1
     UB = 10
 
-    # model = define_model(layer_neurons=layers, input_size=dim)
-    model = define_res_model(dim)
+    if res_model:
+        model = define_res_model(dim)
+    else:
+        model = define_model(layer_neurons=layers, input_size=dim)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=L2_reg)
     loss_object = nn.MSELoss(reduction="mean")
     pbar = trange(EPOCHS, unit="carrots")
@@ -638,14 +658,18 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
 
     # W & B initialization
     if use_wandb:
-        is_regularized = "regularized" if use_frobenious else "non regularized"
-        name = f"{is_regularized}_differentiable_{float(np.random.rand(1))*1000:3.0f}"
+        subname = "non regularised"
+        if use_frobenious:
+            type_frobenius = "L1" if use_absolute_value else "L2"
+            subname = f"regularized_{type_frobenius}"
+        name = f"{subname}_diff_{float(np.random.rand(1)) * 1000:3.0f}"
         wandb.init(
             project="nn_interaction",
             entity="luis_alfredo",
             name=name,
             tags=["interaction analysis"],
-            reinit=True
+            reinit=True,
+            save_code=True
         )
         wandb.watch(model)
     # # I'm going to train
@@ -663,6 +687,7 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     number_of_modules = len(modules)
     parameters_to_prune = list(zip(modules, ["weight"] * number_of_modules))
     sparsity = 0.9
+
     # prune.global_unstructured(
     #     parameters_to_prune,
     #     pruning_method=prune.L1Unstructured,
@@ -678,6 +703,7 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     #     prune.remove(m, 'weight')
 
     # print(f"Pruned network with level of sparsity: {sparsity}")
+
     model.eval()
     model.to(test_features.device)
     y_hat = model(test_features)
@@ -712,9 +738,10 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
 
     msg = ""
     if use_noisy_data:
-        msg += "noisy_data"
+        msg += "_noisy_data"
     if use_frobenious:
-        msg += "_frobenious_reg"
+        thing = "L1" if use_absolute_value else "L2"
+        msg += f"_frobenius_reg_{thing}"
 
     plt.figure()
     visualizer = ResidualsPlot(net, hist=False, qqplot=True)
@@ -756,7 +783,7 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
             "upper bound": UB,
             "lower bound": LB
         }
-        wandb.config = conf
+        wandb.config.update(conf)
         wandb.join()
         wandb.finish()
     print(f"\n the Kolmogov-Smirnov test for the residuals is: "
@@ -812,8 +839,155 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     # t, p_value = stats.kstest((y_hat - test_targets).detach().numpy(), 'norm')
     # print(f"\n The Kolmogov-Smirnov test for the residuals is: "
     #       f"statistic: {t}, p-value: {p_value:0.5f}")
-    torch.save(model.state_dict(), "models/network")
+
+    network_type = "ResNet" if res_model else "FC"
+    torch.save(model.state_dict(), f"models/{network_type}_network{msg}")
     # torch.save(crafted_net.state_dict(), "models/hand_craft_net")
+
+
+# This function assumes that there are 3 models, non regularised, regularised with L2 norm in the interaction matrix
+# and regularised with L1 norm in the interaction matrix. This function compares all of the above models
+# It also asumes that they are all in the models/ folder
+def compare_models(network_type: str = "FC", use_wandb: bool = False):
+    assert network_type == "FC" or network_type == "ResNet", "Network type not recognized it needs to be either FC or ResNet"
+    global L2_reg_model, L1_reg_model
+    from sklearn.manifold import MDS, TSNE
+    testF = TestFunction()
+    HIDDEN_NEURONS = 10
+    CLASSES = 1
+    EPOCHS = 100
+    BATCH_SIZE = 128
+    LEARNING_RATE = 0.002
+    L1_reg = 0
+    L2_reg = 0.005
+    N_samples = 1000
+    dim = 4
+    LB = 1
+    UB = 10
+    layers = [114, 25, 47]
+    if use_wandb:
+        wandb.init(
+            project="nn_interaction",
+            entity="luis_alfredo",
+            name=f"{network_type} model analysis",
+            tags=["interaction analysis"],
+            reinit=True,
+        )
+
+    if network_type == "FC":
+        non_reg_model = define_model(layers, input_size=dim)
+        L2_reg_model = define_model(layers, input_size=dim)
+        L1_reg_model = define_model(layers, input_size=dim)
+        non_reg_model.load_state_dict(torch.load("models/FC_network_noisy_data"))
+        L1_reg_model.load_state_dict(torch.load("models/FC_network_noisy_data_frobenius_reg_L1"))
+        L2_reg_model.load_state_dict(torch.load("models/FC_network_noisy_data_frobenius_reg_L2"))
+    elif network_type == "ResNet":
+        non_reg_model = define_res_model(dim)
+        L2_reg_model = define_res_model(dim)
+        L1_reg_model = define_res_model(dim)
+        non_reg_model.load_state_dict(torch.load("models/ResNet_network_noisy_data"))
+        L1_reg_model.load_state_dict(torch.load("models/ResNet_network_noisy_data_frobenius_reg_L1"))
+        L2_reg_model.load_state_dict(torch.load("models/ResNet_network_noisy_data_frobenius_reg_L2"))
+
+    train_loader, (train_features, train_targets), test_loader, (test_features, test_targets) = get_train_val_data(
+        testF,
+        noisy=True,
+        batch_size=128,
+        N_samples=N_samples,
+        LB=LB,
+        UB=UB)
+
+    L1_reg_model_wrapper = NetWrapper(L1_reg_model)
+    L2_reg_model_wrapper = NetWrapper(L2_reg_model)
+
+    non_reg_model.to(train_features.device)
+    L1_reg_model.to(train_features.device)
+    L2_reg_model.to(train_features.device)
+
+    y_non_regularized = non_reg_model(train_features).detach().numpy()
+    y_L1_regularized = L1_reg_model(train_features).detach().numpy()
+    y_L2_regularized = L2_reg_model(train_features).detach().numpy()
+
+    # L1 vs No Reg
+    plt.figure()
+    prediction_error_vis_L1 = PredictionError(L1_reg_model_wrapper)
+    prediction_error_vis_L1.fit(train_features.detach().numpy(), y_non_regularized)
+    title = f"Agreement between  L1 regularized and non-regularised on {network_type} models"
+
+    prediction_error_vis_L1.finalize()
+    plt.title(title, fontzise=20)
+    plt.savefig(f"images/{network_type}_L1_noReg.png")
+    plt.close()
+    if use_wandb:
+        image = Image.open(f"images/{network_type}_L1_noReg.png")
+        wandb.log({f"{network_type}_L1_noReg": wandb.Image(image)})
+
+    # L2 vs No Reg
+    plt.figure()
+    prediction_error_vis_L2 = PredictionError(L2_reg_model_wrapper)
+    prediction_error_vis_L2.fit(train_features.detach().numpy(), y_non_regularized)
+    title = f"agreement between L2 regularized and non-regularised on {network_type} models"
+    prediction_error_vis_L2.finalize()
+    plt.title(title, fontzise=20)
+    plt.savefig(f"images/{network_type}_L2_noReg.png")
+    plt.close()
+    if use_wandb:
+        image = Image.open(f"images/{network_type}_L2_noReg.png")
+        wandb.log({f"{network_type}_L2_noReg": wandb.Image(image)})
+    # L1 vs L2
+    plt.figure()
+    prediction_error_vis_L2_L1 = PredictionError(L1_reg_model_wrapper)
+    prediction_error_vis_L2_L1.fit(train_features.detach().numpy(), y_L2_regularized)
+    title = f"agreement between L2 regularized and L1 on {network_type} models"
+    prediction_error_vis_L2_L1.finalize()
+    plt.title(title, fontzise=20)
+    plt.savefig(f"images/{network_type}_L2_L1.png")
+    plt.close()
+    if use_wandb:
+        image = Image.open(f"images/{network_type}_L1_L2.png")
+        wandb.log({f"{network_type}_L1_L2": wandb.Image(image)})
+
+    # Compare with MSD and T-SNE
+    non_reg_vector = parameters_to_vector(non_reg_model.parameters()).detach().numpy()
+    L1_vector = parameters_to_vector(L1_reg_model.parameters()).detach().numpy()
+    L2_vector = parameters_to_vector(L2_reg_model.parameters()).detach().numpy()
+    cosine_similarity_non_reg_L1 = spatial.distance.cosine(non_reg_vector, L1_vector)
+    cosine_similarity_non_reg_L2 = spatial.distance.cosine(non_reg_vector, L1_vector)
+    cosine_similarity_L2_L1 = spatial.distance.cosine(L2_vector, L1_vector)
+
+    data = np.stack((non_reg_vector, L1_vector, L2_vector))
+    if use_wandb:
+        wandb.log({"cosine_similarity between non reg and L1": cosine_similarity_non_reg_L1})
+        wandb.log({"cosine_similarity between non reg and L2": cosine_similarity_non_reg_L2})
+        wandb.log({"cosine_similarity between non L1 and L2": cosine_similarity_L2_L1})
+    mds = MDS(n_components=2)
+    tsne = TSNE(n_components=2)
+    new_data_MDS = mds.fit_transform(data)
+    new_data_TSNE = tsne.fit_transform(data)
+    markers = ["d", "v", "s"]  # , "*", "^", "d", "v", "s", "*", "^"]
+    # create MDS plot
+    plt.figure()
+    for xp, yp, m in zip(new_data_MDS[:, 0], new_data_MDS[:, 1], markers):
+        plt.scatter(xp, yp, marker=m, s=50)
+    plt.title("MDS projection", fontsize=20)
+    plt.legend(["No Reg", "L1 reg", "L2 reg"], fontsize=15)
+    plt.savefig(f"images/{network_type}_MDS.png")
+    plt.close()
+    # Create TSNE plot
+    plt.figure()
+    for xp, yp, m in zip(new_data_TSNE[:, 0], new_data_TSNE[:, 1], markers):
+        plt.scatter(xp, yp, marker=m, s=50)
+    plt.title("TSNE projection", fontsize=20)
+    plt.legend(["No Reg", "L1 reg", "L2 reg"], fontsize=15)
+    plt.savefig(f"images/{network_type}_TSNE.png")
+    plt.close()
+    if use_wandb:
+        image1 = Image.open(f"images/{network_type}_MDS.png")
+        image2 = Image.open(f"images/{network_type}_TSNE.png")
+        wandb.log({f"{network_type}_MDS": wandb.Image(image1)})
+        wandb.log({f"{network_type}_TSNE": wandb.Image(image2)})
+        wandb.join()
+        wandb.finish()
 
 
 def f(x, y, w: list):
@@ -1098,11 +1272,14 @@ def main():
     print(f"Rho results: rho 1: {rho_results[0]:0.3f} ,rho 2: {rho_results[1]:0.3f},rho 3:{rho_results[2]:0.3f}")
 
 
-# Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     # run_ES_with_regularization()
-    run_interaction_experiment(use_frobenious=True, use_wandb=True)
-    run_interaction_experiment(use_frobenious=False, use_wandb=True)
+    run_interaction_experiment(use_frobenious=False, use_wandb=False, use_absolute_value=False)
+    run_interaction_experiment(use_frobenious=True, use_wandb=False, use_absolute_value=False)
+    run_interaction_experiment(use_frobenious=True, use_wandb=False, use_absolute_value=True)
+    compare_models("FC")
+
+    # run_interaction_experiment(use_frobenious=False, use_wandb=True)
 
     # print_hi('PyCharm')
     # w1 = np.random.rand(3, 4) * 4 +1
