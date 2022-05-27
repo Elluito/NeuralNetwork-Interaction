@@ -11,6 +11,7 @@ import torch
 import numpy as np
 import tensorflow as tf
 import copy
+from functools import partial
 from DG2 import ism, rho_metrics, dsm
 from dataclasses import dataclass, field
 import typing as type
@@ -32,8 +33,6 @@ from evograd import expectation
 from evograd.distributions import Normal
 import wandb
 from PIL import Image
-import matplotlib.pyplot as plt
-import pandas as pd
 from scipy import spatial
 
 data_X = [[0.55, 0.789, 0.697, 0.69873], [0.133654, 0.36524, 0.48563, 0.36589]]
@@ -300,7 +299,8 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
             sum_of_absolute_values = torch.sum(torch.abs(parameters_to_vector(model.parameters())))
             sum_of_absolute_values.mul_(L1_lambda)
             value.add_(sum_of_absolute_values)
-            wandb.log({"train objective loss": value})
+            if use_wandb:
+                wandb.log({"train objective loss": value})
             if matrix_regularizer:
                 int_m, _, _, _ = ism(model, dim=dim, lb=LB, ub=UB, is_NN=True, use_grad=True)
                 int_m = replace_nan(int_m)
@@ -323,7 +323,6 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
         else:
             if matrix_regularizer is not None:
                 with torch.no_grad():
-                    wandb.log({"train objective loss": value})
                     if matrix_regularizer:
                         int_m, _, _, _ = ism(model, dim=dim, lb=LB, ub=UB, is_NN=True, use_grad=True)
                         int_m = replace_nan(int_m)
@@ -332,6 +331,7 @@ def loss_one_epoch(model: nn.Module, data_loader: torch.utils.data.DataLoader, o
                     if use_wandb:
                         wandb.log({"scaled_frobenius_norm": reg})
                         wandb.log({"train combined loss": value})
+                        wandb.log({"train objective loss": value})
         cumulative_sum += value.item()
         total_items += len(data)
         if batch_size == 1:
@@ -845,6 +845,33 @@ def run_interaction_experiment(use_noisy_data: bool = True, use_frobenious: bool
     # torch.save(crafted_net.state_dict(), "models/hand_craft_net")
 
 
+def create_heatmap(matrix: typing.Union[torch.Tensor, np.array], title: str = "", save_path: str = "images/") -> str:
+    N = matrix.shape[0]
+    M = matrix.shape[1]
+    fig, ax = plt.subplots()
+    im = ax.imshow(matrix)
+
+    # Show all ticks and label them with the respective list entries
+    ax.set_xticks(np.arange(N))
+    ax.set_yticks(np.arange(M))
+
+    # Rotate the tick labels and set their alignment.
+    # plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+    #          rotation_mode="anchor")
+
+    # Loop over data dimensions and create text annotations.
+    for i in range(N):
+        for j in range(M):
+            text = ax.text(j, i, matrix[i, j],
+                           ha="center", va="center", color="w")
+
+    ax.set_title(title)
+    fig.tight_layout()
+    path = save_path + title.replace(" ", "_") + ".png"
+    plt.savefig(path)
+    return path
+
+
 # This function assumes that there are 3 models, non regularised, regularised with L2 norm in the interaction matrix
 # and regularised with L1 norm in the interaction matrix. This function compares all of the above models
 # It also asumes that they are all in the models/ folder
@@ -896,14 +923,139 @@ def compare_models(network_type: str = "FC", use_wandb: bool = False):
         N_samples=N_samples,
         LB=LB,
         UB=UB)
-
-    L1_reg_model_wrapper = NetWrapper(L1_reg_model)
-    L2_reg_model_wrapper = NetWrapper(L2_reg_model)
+    L1_reg_model.cuda()
+    L2_reg_model.cuda()
+    lambda_matrix_L1, _, _, _ = ism(L1_reg_model, dim=dim, lb=LB, ub=UB, is_NN=True,
+                                    use_grad=False)
+    lambda_matrix_L2, _, _, _ = ism(L2_reg_model, dim=dim, lb=LB, ub=UB, is_NN=True,
+                                    use_grad=False)
+    if use_wandb:
+        columns = ["Type of regularisation", "Lambda matrix"]
+        table = wandb.Table(columns=columns)
+        thing1 = replace_nan(lambda_matrix_L1).detach().cpu().numpy()
+        thing2 = replace_nan(lambda_matrix_L2).detach().cpu().numpy()
+        path1 = create_heatmap(thing1, "Lambda Matrix L1")
+        path2 = create_heatmap(thing2, "Lambda Matrix L2")
+        image1 = Image.open(path1)
+        image2 = Image.open(path2)
+        table.add_data("L1", wandb.Image(image1))
+        table.add_data("L2", wandb.Image(image2))
+        wandb.log({"Lambda matrices": table})
 
     non_reg_model.to(train_features.device)
     L1_reg_model.to(train_features.device)
     L2_reg_model.to(train_features.device)
 
+    L1_reg_model_wrapper = NetWrapper(L1_reg_model)
+    L2_reg_model_wrapper = NetWrapper(L2_reg_model)
+    non_reg_model_wrapper = NetWrapper(non_reg_model)
+
+    # Check how well each models adapts to the test data
+
+    # How well  non reg does
+    plt.figure()
+    visualizer = ResidualsPlot(non_reg_model_wrapper, hist=False, qqplot=True)
+    visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
+    # visualizer
+    visualizer.score(test_features.detach().numpy(),
+                     test_targets.detach().numpy())  # Evaluate the model on the test data
+
+    title = f"Residuals of non-regularised model withe type {network_type}"
+
+    visualizer.finalize()
+    plt.title(title, fontsize=12)
+    plt.savefig(f"images/{network_type}_residuals_noReg_data.png")
+    plt.close()
+    # Now the prediction error
+    plt.figure()
+    visualizer = PredictionError(non_reg_model_wrapper)
+    visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
+    # visualizer
+    visualizer.score(test_features.detach().numpy(),
+                     test_targets.detach().numpy())  # Evaluate the model on the test data
+
+    title = f"Prediction error of non-regularised model with type {network_type}"
+
+    visualizer.finalize()
+    plt.title(title, fontsize=12)
+    plt.savefig(f"images/{network_type}_pred_noReg_data.png")
+    plt.close()
+
+    if use_wandb:
+        image1 = Image.open(f"images/{network_type}_residuals_noReg_data.png")
+        image2 = Image.open(f"images/{network_type}_pred_noReg_data.png")
+        wandb.log({f"{network_type}_residuals_noReg_data.png": wandb.Image(image1)})
+        wandb.log({f"{network_type}_pred_noReg_data.png": wandb.Image(image2)})
+
+    # How well  L1 reg does
+    plt.figure()
+    visualizer = ResidualsPlot(L1_reg_model_wrapper, hist=False, qqplot=True)
+    visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
+    # visualizer
+    visualizer.score(test_features.detach().numpy(),
+                     test_targets.detach().numpy())  # Evaluate the model on the test data
+
+    title = f"Residuals of L1 model with type {network_type}"
+    visualizer.finalize()
+    plt.title(title, fontsize=12)
+    plt.savefig(f"images/{network_type}_residuals_L1reg_data.png")
+    plt.close()
+
+    # Now the prediction error
+    plt.figure()
+    visualizer = PredictionError(L1_reg_model_wrapper)
+    visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
+    # visualizer
+    visualizer.score(test_features.detach().numpy(),
+                     test_targets.detach().numpy())  # Evaluate the model on the test data
+
+    title = f"Prediction error of L1 model with type {network_type}"
+
+    visualizer.finalize()
+    plt.title(title, fontsize=12)
+    plt.savefig(f"images/{network_type}_pred_L1Reg_data.png")
+    plt.close()
+
+    if use_wandb:
+        image1 = Image.open(f"images/{network_type}_residuals_L1Reg_data.png")
+        image2 = Image.open(f"images/{network_type}_pred_L1Reg_data.png")
+        wandb.log({f"{network_type}_residuals_L1Reg_data.png": wandb.Image(image1)})
+        wandb.log({f"{network_type}_pred_L1Reg_data.png": wandb.Image(image2)})
+    # How well  L2 reg does
+    plt.figure()
+    visualizer = ResidualsPlot(L2_reg_model_wrapper, hist=False, qqplot=True)
+    visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
+    # visualizer
+    visualizer.score(test_features.detach().numpy(),
+                     test_targets.detach().numpy())  # Evaluate the model on the test data
+
+    title = f"Residuals of L2 model with type {network_type}"
+    visualizer.finalize()
+    plt.title(title, fontsize=12)
+    plt.savefig(f"images/{network_type}_residuals_L2reg_data.png")
+    plt.close()
+    # Now the prediction error
+    plt.figure()
+    visualizer = PredictionError(L2_reg_model_wrapper)
+    visualizer.fit(train_features.detach().numpy(), train_targets.detach().numpy())  # Fit the training data to the
+    # visualizer
+    visualizer.score(test_features.detach().numpy(),
+                     test_targets.detach().numpy())  # Evaluate the model on the test data
+
+    title = f"Prediction error of L2 model with type {network_type}"
+
+    visualizer.finalize()
+    plt.title(title, fontsize=12)
+    plt.savefig(f"images/{network_type}_pred_L2Reg_data.png")
+    plt.close()
+
+    if use_wandb:
+        image1 = Image.open(f"images/{network_type}_residuals_L2Reg_data.png")
+        image2 = Image.open(f"images/{network_type}_pred_L2Reg_data.png")
+        wandb.log({f"{network_type}_residuals_L2Reg_data.png": wandb.Image(image1)})
+        wandb.log({f"{network_type}_pred_L2Reg_data.png": wandb.Image(image2)})
+
+    # Comparison of models against eachother
     y_non_regularized = non_reg_model(train_features).detach().numpy()
     y_L1_regularized = L1_reg_model(train_features).detach().numpy()
     y_L2_regularized = L2_reg_model(train_features).detach().numpy()
@@ -912,10 +1064,12 @@ def compare_models(network_type: str = "FC", use_wandb: bool = False):
     plt.figure()
     prediction_error_vis_L1 = PredictionError(L1_reg_model_wrapper)
     prediction_error_vis_L1.fit(train_features.detach().numpy(), y_non_regularized)
+    prediction_error_vis_L1.score(test_features.detach().numpy(),
+                                  test_targets.detach().numpy())
     title = f"Agreement between  L1 regularized and non-regularised on {network_type} models"
 
     prediction_error_vis_L1.finalize()
-    plt.title(title, fontzise=20)
+    plt.title(title, fontsize=12)
     plt.savefig(f"images/{network_type}_L1_noReg.png")
     plt.close()
     if use_wandb:
@@ -926,9 +1080,11 @@ def compare_models(network_type: str = "FC", use_wandb: bool = False):
     plt.figure()
     prediction_error_vis_L2 = PredictionError(L2_reg_model_wrapper)
     prediction_error_vis_L2.fit(train_features.detach().numpy(), y_non_regularized)
+    prediction_error_vis_L2.score(test_features.detach().numpy(),
+                                  test_targets.detach().numpy())
     title = f"agreement between L2 regularized and non-regularised on {network_type} models"
     prediction_error_vis_L2.finalize()
-    plt.title(title, fontzise=20)
+    plt.title(title, fontsize=15)
     plt.savefig(f"images/{network_type}_L2_noReg.png")
     plt.close()
     if use_wandb:
@@ -938,14 +1094,16 @@ def compare_models(network_type: str = "FC", use_wandb: bool = False):
     plt.figure()
     prediction_error_vis_L2_L1 = PredictionError(L1_reg_model_wrapper)
     prediction_error_vis_L2_L1.fit(train_features.detach().numpy(), y_L2_regularized)
-    title = f"agreement between L2 regularized and L1 on {network_type} models"
+    prediction_error_vis_L2_L1.score(test_features.detach().numpy(), L2_reg_model(train_features).detach().numpy())
+    title = f"Agreement between L2 regularized and L1 on {network_type} models"
     prediction_error_vis_L2_L1.finalize()
-    plt.title(title, fontzise=20)
+    plt.title(title, fontsize=20)
     plt.savefig(f"images/{network_type}_L2_L1.png")
     plt.close()
+
     if use_wandb:
-        image = Image.open(f"images/{network_type}_L1_L2.png")
-        wandb.log({f"{network_type}_L1_L2": wandb.Image(image)})
+        image = Image.open(f"images/{network_type}_L2_L1.png")
+        wandb.log({f"{network_type}_L2_L1": wandb.Image(image)})
 
     # Compare with MSD and T-SNE
     non_reg_vector = parameters_to_vector(non_reg_model.parameters()).detach().numpy()
@@ -968,7 +1126,7 @@ def compare_models(network_type: str = "FC", use_wandb: bool = False):
     # create MDS plot
     plt.figure()
     for xp, yp, m in zip(new_data_MDS[:, 0], new_data_MDS[:, 1], markers):
-        plt.scatter(xp, yp, marker=m, s=50)
+        plt.scatter(xp, yp, marker=m, s=200)
     plt.title("MDS projection", fontsize=20)
     plt.legend(["No Reg", "L1 reg", "L2 reg"], fontsize=15)
     plt.savefig(f"images/{network_type}_MDS.png")
@@ -976,7 +1134,7 @@ def compare_models(network_type: str = "FC", use_wandb: bool = False):
     # Create TSNE plot
     plt.figure()
     for xp, yp, m in zip(new_data_TSNE[:, 0], new_data_TSNE[:, 1], markers):
-        plt.scatter(xp, yp, marker=m, s=50)
+        plt.scatter(xp, yp, marker=m, s=200)
     plt.title("TSNE projection", fontsize=20)
     plt.legend(["No Reg", "L1 reg", "L2 reg"], fontsize=15)
     plt.savefig(f"images/{network_type}_TSNE.png")
@@ -1272,12 +1430,144 @@ def main():
     print(f"Rho results: rho 1: {rho_results[0]:0.3f} ,rho 2: {rho_results[1]:0.3f},rho 3:{rho_results[2]:0.3f}")
 
 
+def get_nearest_point(reference: torch.Tensor, batch: torch.Tensor, metric: typing.Callable):
+    if metric is None:
+        metric = partial(F.mse_loss, reduction="sum")
+    x, y = batch
+    distances = torch.tensor(list(map(metric, batch[0], reference.repeat((len(batch[0]), 1)))), dtype=torch.float)
+
+    nearest = torch.argmin(distances)
+    x_nearest = x[nearest].clone()
+    y_nearest = y[nearest].clone()
+    return x_nearest, y_nearest
+def batch_ism(batch:torch.Tensor,f: nn.Module, dim: int, ub: int, lb: int, use_grad: bool =
+False):
+    metric = partial(F.mse_loss, reduction="sum")
+    x, y = batch
+    max_x,index_max_x = torch.max(x,axis=0)
+    min_x,index_min_x = torch.min(x,axis=0)
+    if use_grad:
+        temp = (ub + lb) / 2
+        # pdb.set_trace()
+
+        f_archive = torch.zeros((dim, dim)) * torch.nan
+        fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
+        delta1 = torch.zeros((dim, dim)) * torch.nan
+        delta2 = torch.zeros((dim, dim)) * torch.nan
+        lambda_matrix = torch.zeros((dim, dim)) * torch.nan
+
+        p1 = get_nearest_point(reference=min_x,batch=batch,metric=metric)
+        p1.to(torch.device("cuda"))
+
+        fp1 = f(p1)
+        counter = 0
+        prev = 0
+        prog = 0
+
+        for i in range(dim - 1):
+            if not torch.isnan(fhat_archive[i]):
+                fp2 = fhat_archive[i]
+        else:
+            p2 = copy.deepcopy(p1)
+        p2[i] = max_x[i]
+        p2.to(torch.device("cuda"))
+        fp2 = f(p2)
+
+        fhat_archive[i] = fp2
+
+        for j in range(i + 1, dim):
+            counter += 1
+        prev = prog
+        prog = torch.tensor([counter // (dim * (dim - 1)) * 2 * 100])
+
+        if prog % 5 == 0 and prog != prev:
+            print("Progress: {}%".format(prog))
+        if not torch.isnan(fhat_archive[j]):
+            fp3 = fhat_archive[j]
+        else:
+            p3 = copy.deepcopy(p1)
+        p3[j] = max_x[j]
+        p3.to(torch.device("cuda"))
+        fp3 = f(p3)
+        fhat_archive[j] = fp3
+        p4 = copy.deepcopy(p1)
+        p4[i] = max_x[j]
+        p4[j] = max_x[j]
+        p4.to(torch.device("cuda"))
+        fp4 = f(p4)
+        f_archive[i, j] = fp4
+        f_archive[j, i] = fp4
+        d1 = fp2 - fp1
+        d2 = fp4 - fp3
+        delta1[i, j] = d1
+        delta2[i, j] = d2
+        # pdb.set_trace()
+        lambda_matrix[i, j] = abs(d1 - d2)
+        # pdb.set_trace()
+        return lambda_matrix, fhat_archive, f_archive, fp1
+    else:
+        with torch.no_grad():
+            temp = (ub + lb) / 2
+            f_archive = torch.zeros((dim, dim)) * torch.nan
+            fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
+            delta1 = torch.zeros((dim, dim)) * torch.nan
+            delta2 = torch.zeros((dim, dim)) * torch.nan
+            lambda_matrix = torch.zeros((dim, dim)) * torch.nan
+
+            p1 = torch.tensor([lb] * dim, dtype=torch.float32, device=torch.device("cuda"))
+            fp1 = f(p1)
+            counter = 0
+            prev = 0
+            prog = 0
+
+            for i in range(dim - 1):
+                if not torch.isnan(fhat_archive[i]):
+                    fp2 = fhat_archive[i]
+            else:
+                p2 = copy.deepcopy(p1)
+            p2[i] = copy.deepcopy(temp)
+            p2.to(torch.device("cuda"))
+            fp2 = f(p2)
+            fhat_archive[i] = fp2
+
+            for j in range(i + 1, dim):
+                counter += 1
+            prev = prog
+            prog = torch.tensor([counter // (dim * (dim - 1)) * 2 * 100])
+
+            if prog % 5 == 0 and prog != prev:
+                print("Progress: {}%".format(prog))
+            if not torch.isnan(fhat_archive[j]):
+                fp3 = fhat_archive[j]
+            else:
+                p3 = copy.copy(p1)
+            p3[j] = temp
+            p3.to(torch.device("cuda"))
+            fp3 = f(p3)
+            fhat_archive[j] = fp3
+            p4 = copy.deepcopy(p1)
+            p4[i] = temp
+            p4[j] = temp
+            p4.to(torch.device("cuda"))
+            fp4 = f(p4)
+            f_archive[i, j] = fp4
+            f_archive[j, i] = fp4
+            d1 = fp2 - fp1
+            d2 = fp4 - fp3
+            delta1[i, j] = d1
+            delta2[i, j] = d2
+            # pdb.set_trace()
+            lambda_matrix[i, j] = abs(d1 - d2)
+            # pdb.set_trace()
+            return lambda_matrix, fhat_archive, f_archive, fp1
+
+
 if __name__ == '__main__':
     # run_ES_with_regularization()
-    run_interaction_experiment(use_frobenious=False, use_wandb=False, use_absolute_value=False)
-    run_interaction_experiment(use_frobenious=True, use_wandb=False, use_absolute_value=False)
-    run_interaction_experiment(use_frobenious=True, use_wandb=False, use_absolute_value=True)
-    compare_models("FC")
+    run_interaction_experiment(use_frobenious=False, use_wandb=False, use_absolute_value=False, res_model=True)
+    run_interaction_experiment(use_frobenious=True, use_wandb=False, use_absolute_value=False, res_model=True)
+    run_interaction_experiment(use_frobenious=True, use_wandb=False, use_absolute_value=True, res_model=True)
+    compare_models("ResNet", use_wandb=True)
 
     # run_interaction_experiment(use_frobenious=False, use_wandb=True)
 

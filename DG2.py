@@ -10,7 +10,7 @@ eps = sys.float_info.epsilon
 
 
 def ism(f: typing.Callable, dim: int, ub: int, lb: int, is_NN: bool = False, use_grad: bool = False) -> typing.Tuple[
-    typing.Union[typing.Iterable,torch.TensorType], typing.Iterable,
+    typing.Union[typing.Iterable, torch.TensorType], typing.Iterable,
     typing.Iterable, typing.Iterable]:
     if not is_NN:
         temp = (ub + lb) / 2
@@ -70,12 +70,12 @@ def ism(f: typing.Callable, dim: int, ub: int, lb: int, is_NN: bool = False, use
             # pdb.set_trace()
 
             f_archive = torch.zeros((dim, dim)) * torch.nan
-            fhat_archive = torch.zeros((dim, 1),device=torch.device("cuda")) * torch.nan
+            fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
             delta1 = torch.zeros((dim, dim)) * torch.nan
             delta2 = torch.zeros((dim, dim)) * torch.nan
             lambda_matrix = torch.zeros((dim, dim)) * torch.nan
 
-            p1 = torch.tensor([lb] * dim, dtype=torch.float32,device=torch.device("cuda"))
+            p1 = torch.tensor([lb] * dim, dtype=torch.float32, device=torch.device("cuda"))
 
             fp1 = f(p1)
             counter = 0
@@ -127,12 +127,12 @@ def ism(f: typing.Callable, dim: int, ub: int, lb: int, is_NN: bool = False, use
             with torch.no_grad():
                 temp = (ub + lb) / 2
                 f_archive = torch.zeros((dim, dim)) * torch.nan
-                fhat_archive = torch.zeros((dim, 1),device=torch.device("cuda")) * torch.nan
+                fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
                 delta1 = torch.zeros((dim, dim)) * torch.nan
                 delta2 = torch.zeros((dim, dim)) * torch.nan
                 lambda_matrix = torch.zeros((dim, dim)) * torch.nan
 
-                p1 = torch.tensor([lb] * dim, dtype=torch.float32,device=torch.device("cuda"))
+                p1 = torch.tensor([lb] * dim, dtype=torch.float32, device=torch.device("cuda"))
                 fp1 = f(p1)
                 counter = 0
                 prev = 0
@@ -178,6 +178,7 @@ def ism(f: typing.Callable, dim: int, ub: int, lb: int, is_NN: bool = False, use
                         lambda_matrix[i, j] = abs(d1 - d2)
                     # pdb.set_trace()
                 return lambda_matrix, fhat_archive, f_archive, fp1
+
 
 
 def dsm(fhat_archive, lambda_matrix, f_archive, fp1, dim):
