@@ -1440,26 +1440,42 @@ def get_nearest_point(reference: torch.Tensor, batch: torch.Tensor, metric: typi
     x_nearest = x[nearest].clone()
     y_nearest = y[nearest].clone()
     return x_nearest, y_nearest
+
+
 def batch_ism(batch:torch.Tensor,f: nn.Module, dim: int, ub: int, lb: int, use_grad: bool =
 False):
+
     metric = partial(F.mse_loss, reduction="sum")
+
     x, y = batch
+    x.cuda()
+    y.cuda()
+
     max_x,index_max_x = torch.max(x,axis=0)
     min_x,index_min_x = torch.min(x,axis=0)
-    if use_grad:
-        temp = (ub + lb) / 2
-        # pdb.set_trace()
 
+
+    if use_grad:
+        # pdb.set_trace()
         f_archive = torch.zeros((dim, dim)) * torch.nan
         fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
         delta1 = torch.zeros((dim, dim)) * torch.nan
         delta2 = torch.zeros((dim, dim)) * torch.nan
         lambda_matrix = torch.zeros((dim, dim)) * torch.nan
+        # Things for the neurlan network
+        f_archive_NN = torch.zeros((dim, dim)) * torch.nan
+        fhat_archive_NN = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
+        delta1_NN = torch.zeros((dim, dim)) * torch.nan
+        delta2_NN = torch.zeros((dim, dim)) * torch.nan
+        lambda_matrix_NN = torch.zeros((dim, dim)) * torch.nan
 
-        p1 = get_nearest_point(reference=min_x,batch=batch,metric=metric)
-        p1.to(torch.device("cuda"))
+        p1 = min_x
 
-        fp1 = f(p1)
+        p1_NN, fp1 = get_nearest_point(reference=min_x,batch=batch,metric=metric)
+
+        p1_NN.to(torch.device("cuda"))
+        # The output of the  neural network is being keot in parallel
+        fp1_NN = f(p1_NN)
         counter = 0
         prev = 0
         prog = 0
@@ -1467,68 +1483,16 @@ False):
         for i in range(dim - 1):
             if not torch.isnan(fhat_archive[i]):
                 fp2 = fhat_archive[i]
-        else:
-            p2 = copy.deepcopy(p1)
-        p2[i] = max_x[i]
-        p2.to(torch.device("cuda"))
-        fp2 = f(p2)
-
-        fhat_archive[i] = fp2
-
-        for j in range(i + 1, dim):
-            counter += 1
-        prev = prog
-        prog = torch.tensor([counter // (dim * (dim - 1)) * 2 * 100])
-
-        if prog % 5 == 0 and prog != prev:
-            print("Progress: {}%".format(prog))
-        if not torch.isnan(fhat_archive[j]):
-            fp3 = fhat_archive[j]
-        else:
-            p3 = copy.deepcopy(p1)
-        p3[j] = max_x[j]
-        p3.to(torch.device("cuda"))
-        fp3 = f(p3)
-        fhat_archive[j] = fp3
-        p4 = copy.deepcopy(p1)
-        p4[i] = max_x[j]
-        p4[j] = max_x[j]
-        p4.to(torch.device("cuda"))
-        fp4 = f(p4)
-        f_archive[i, j] = fp4
-        f_archive[j, i] = fp4
-        d1 = fp2 - fp1
-        d2 = fp4 - fp3
-        delta1[i, j] = d1
-        delta2[i, j] = d2
-        # pdb.set_trace()
-        lambda_matrix[i, j] = abs(d1 - d2)
-        # pdb.set_trace()
-        return lambda_matrix, fhat_archive, f_archive, fp1
-    else:
-        with torch.no_grad():
-            temp = (ub + lb) / 2
-            f_archive = torch.zeros((dim, dim)) * torch.nan
-            fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
-            delta1 = torch.zeros((dim, dim)) * torch.nan
-            delta2 = torch.zeros((dim, dim)) * torch.nan
-            lambda_matrix = torch.zeros((dim, dim)) * torch.nan
-
-            p1 = torch.tensor([lb] * dim, dtype=torch.float32, device=torch.device("cuda"))
-            fp1 = f(p1)
-            counter = 0
-            prev = 0
-            prog = 0
-
-            for i in range(dim - 1):
-                if not torch.isnan(fhat_archive[i]):
-                    fp2 = fhat_archive[i]
+                fp2_NN = fhat_archive_NN[i]
             else:
                 p2 = copy.deepcopy(p1)
-            p2[i] = copy.deepcopy(temp)
-            p2.to(torch.device("cuda"))
-            fp2 = f(p2)
-            fhat_archive[i] = fp2
+                p2[i] = max_x[i]
+                p2.to(torch.device("cuda"))
+                p2_NN, fp2 = get_nearest_point(reference=p2,batch=batch,metric=metric)
+                fp2_NN = f(p2_NN)
+
+                fhat_archive[i] = fp2
+                fhat_archive_NN[i] = fp2_NN
 
             for j in range(i + 1, dim):
                 counter += 1
@@ -1540,26 +1504,137 @@ False):
             if not torch.isnan(fhat_archive[j]):
                 fp3 = fhat_archive[j]
             else:
-                p3 = copy.copy(p1)
-            p3[j] = temp
-            p3.to(torch.device("cuda"))
-            fp3 = f(p3)
-            fhat_archive[j] = fp3
+                p3 = copy.deepcopy(p1)
+                p3[j] = max_x[j]
+                p3.to(torch.device("cuda"))
+                p3_NN, fp3 = get_nearest_point(reference=p3,batch=batch,metric=metric)
+                p3_NN.to(torch.device("cuda"))
+                fp3_NN = f(p3_NN)
+
+                fhat_archive[j] = fp3
+                fhat_archive_NN[j] =fp3_NN
+
             p4 = copy.deepcopy(p1)
-            p4[i] = temp
-            p4[j] = temp
+            p4[i] = max_x[j]
+            p4[j] = max_x[j]
             p4.to(torch.device("cuda"))
-            fp4 = f(p4)
+            p4_NN, fp4 = get_nearest_point(reference=p4,batch=batch,metric=metric)
+            p4_NN.to(torch.device("cuda"))
+            fp3_NN = f(p4_NN)
+
             f_archive[i, j] = fp4
             f_archive[j, i] = fp4
             d1 = fp2 - fp1
             d2 = fp4 - fp3
             delta1[i, j] = d1
             delta2[i, j] = d2
+            lambda_matrix[i, j] = torch.abs(d1 - d2)
+
+
+
+            f_archive_NN[i, j] = fp4
+            f_archive_NN[j, i] = fp4_NN
+            d1 = fp2_NN - fp1_NN
+            d2 = fp4_NN - fp3_NN
+            delta1_NN[i, j] = d1
+            delta2_NN[i, j] = d2
             # pdb.set_trace()
-            lambda_matrix[i, j] = abs(d1 - d2)
+            lambda_matrix_NN[i,j]=torch.abs(d1-d2)
             # pdb.set_trace()
-            return lambda_matrix, fhat_archive, f_archive, fp1
+        return (lambda_matrix, fhat_archive, f_archive,
+                fp1),(lambda_matrix_NN,fhat_archive_NN,f_archive_NN,fp1_NN)
+    else:
+        with torch.no_grad():
+        # pdb.set_trace()
+
+        f_archive = torch.zeros((dim, dim)) * torch.nan
+        fhat_archive = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
+        delta1 = torch.zeros((dim, dim)) * torch.nan
+        delta2 = torch.zeros((dim, dim)) * torch.nan
+        lambda_matrix = torch.zeros((dim, dim)) * torch.nan
+        # Things for the neurlan network
+        f_archive_NN = torch.zeros((dim, dim)) * torch.nan
+        fhat_archive_NN = torch.zeros((dim, 1), device=torch.device("cuda")) * torch.nan
+        delta1_NN = torch.zeros((dim, dim)) * torch.nan
+        delta2_NN = torch.zeros((dim, dim)) * torch.nan
+        lambda_matrix_NN = torch.zeros((dim, dim)) * torch.nan
+
+        p1 = min_x
+
+        p1_NN, fp1 = get_nearest_point(reference=min_x,batch=batch,metric=metric)
+
+        p1_NN.to(torch.device("cuda"))
+        # The output of the  neural network paralele bein computed
+        fp1_NN = f(p1_NN)
+        counter = 0
+        prev = 0
+        prog = 0
+
+        for i in range(dim - 1):
+            if not torch.isnan(fhat_archive[i]):
+                fp2 = fhat_archive[i]
+                fp2_NN = fhat_archive_NN[i]
+            else:
+                p2 = copy.deepcopy(p1)
+                p2[i] = max_x[i]
+                p2.to(torch.device("cuda"))
+                p2_NN, fp2 = get_nearest_point(reference=p2,batch=batch,metric=metric)
+                fp2_NN = f(p2_NN)
+
+                fhat_archive[i] = fp2
+                fhat_archive_NN[i] = fp2_NN
+
+            for j in range(i + 1, dim):
+                counter += 1
+            prev = prog
+            prog = torch.tensor([counter // (dim * (dim - 1)) * 2 * 100])
+
+            if prog % 5 == 0 and prog != prev:
+                print("Progress: {}%".format(prog))
+            if not torch.isnan(fhat_archive[j]):
+                fp3 = fhat_archive[j]
+            else:
+                p3 = copy.deepcopy(p1)
+                p3[j] = max_x[j]
+                p3.to(torch.device("cuda"))
+                p3_NN, fp3 = get_nearest_point(reference=p3,batch=batch,metric=metric)
+                p3_NN.to(torch.device("cuda"))
+                fp3_NN = f(p3_NN)
+
+                fhat_archive[j] = fp3
+                fhat_archive_NN[j] =fp3_NN
+
+            p4 = copy.deepcopy(p1)
+            p4[i] = max_x[j]
+            p4[j] = max_x[j]
+            p4.to(torch.device("cuda"))
+            p4_NN, fp4 = get_nearest_point(reference=p4,batch=batch,metric=metric)
+            p4_NN.to(torch.device("cuda"))
+            fp3_NN = f(p4_NN)
+
+            f_archive[i, j] = fp4
+            f_archive[j, i] = fp4
+            d1 = fp2 - fp1
+            d2 = fp4 - fp3
+            delta1[i, j] = d1
+            delta2[i, j] = d2
+            lambda_matrix[i, j] = torch.abs(d1 - d2)
+
+
+
+            f_archive_NN[i, j] = fp4
+            f_archive_NN[j, i] = fp4_NN
+            d1 = fp2_NN - fp1_NN
+            d2 = fp4_NN - fp3_NN
+            delta1_NN[i, j] = d1
+            delta2_NN[i, j] = d2
+            # pdb.set_trace()
+            lambda_matrix_NN[i,j]=torch.abs(d1-d2)
+            # pdb.set_trace()
+        return (lambda_matrix, fhat_archive, f_archive,
+                fp1),(lambda_matrix_NN,fhat_archive_NN,f_archive_NN,fp1_NN)
+
+    
 
 
 if __name__ == '__main__':

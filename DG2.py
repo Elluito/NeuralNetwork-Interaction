@@ -41,27 +41,32 @@ def ism(f: typing.Callable, dim: int, ub: int, lb: int, is_NN: bool = False, use
                 counter += 1
                 prev = prog
                 prog = np.floor(counter / (dim * (dim - 1)) * 2 * 100)
-                if prog % 5 == 0 and prog != prev:
-                    print("Progress: {}%".format(prog))
-                if not np.isnan(fhat_archive[j]):
-                    fp3 = fhat_archive[j]
-                else:
+            if prog % 5 == 0 and prog != prev:
+                print("Progress: {}%".format(prog))
+            if not np.isnan(fhat_archive[j]):
+                fp3 = fhat_archive[j]
+                fp3_NN = fhat_archive_NN[j]
+            else:
                     p3 = copy.copy(p1)
-                    p3[j] = temp
+                    #TODO: Here I idented the next 3 lines so they would fit on the else case above
+                    # this because it seemed reduntant to have the line
+                    #     fhat_archive[j] = fp3
+                    # in this else and in the if above replace fp3 with fhat_archive
+                    p3[j] = max_x[j]
                     fp3 = f(p3)
                     fhat_archive[j] = fp3
-                p4 = copy.deepcopy(p1)
-                p4[i] = temp
-                p4[j] = temp
-                fp4 = f(p4)
-                f_archive[i, j] = fp4
-                f_archive[j, i] = fp4
-                d1 = fp2 - fp1
-                d2 = fp4 - fp3
-                delta1[i, j] = d1
-                delta2[i, j] = d2
-                # pdb.set_trace()
-                lambda_matrix[i, j] = abs(d1 - d2)
+            p4 = copy.deepcopy(p1)
+            p4[i] = temp
+            p4[j] = temp
+            fp4 = f(p4)
+            f_archive[i, j] = fp4
+            f_archive[j, i] = fp4
+            d1 = fp2 - fp1
+            d2 = fp4 - fp3
+            delta1[i, j] = d1
+            delta2[i, j] = d2
+            # pdb.set_trace()
+            lambda_matrix[i, j] = abs(d1 - d2)
             # pdb.set_trace()
         return lambda_matrix, fhat_archive, f_archive, fp1
     else:
